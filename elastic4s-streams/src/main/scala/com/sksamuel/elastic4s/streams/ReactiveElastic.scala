@@ -1,7 +1,7 @@
 package com.sksamuel.elastic4s.streams
 
 import akka.actor.ActorSystem
-import com.sksamuel.elastic4s.{ElasticClient, ElasticDsl, IndexAndTypes, SearchDefinition}
+import com.sksamuel.elastic4s._
 
 import scala.concurrent.duration.FiniteDuration
 import scala.language.implicitConversions
@@ -18,7 +18,8 @@ object ReactiveElastic {
                       listener: ResponseListener = ResponseListener.noop,
                       completionFn: () => Unit = () => (),
                       errorFn: Throwable => Unit = _ => (),
-                      flushInterval: Option[FiniteDuration] = None)
+                      flushInterval: Option[FiniteDuration] = None,
+                      failureFn : (BulkDefinition, BulkResult) => Option[BulkDefinition] = (_,_) => None)
                      (implicit builder: RequestBuilder[T], system: ActorSystem): BulkIndexingSubscriber[T] = {
       new BulkIndexingSubscriber[T](client,
         builder,
@@ -28,7 +29,8 @@ object ReactiveElastic {
         refreshAfterOp,
         completionFn,
         errorFn,
-        flushInterval)
+        flushInterval,
+        failureFn)
     }
 
     def publisher(indexType: IndexAndTypes, elements: Long = Long.MaxValue, keepAlive: String = "1m")

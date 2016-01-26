@@ -9,26 +9,26 @@ import scala.concurrent.duration.FiniteDuration
 import scala.util.{Failure, Success}
 
 /**
- * An implementation of the reactive API Subscriber.
- * This subscriber will bulk index received elements. The bulk nature means that the elasticsearch
- * index operations are performed as a bulk call, the size of which are controlled by the batchSize param.
- *
- * The received elements must be converted into an elastic4s bulk compatible definition, such as index or delete.
- * This is done by the RequestBuilder.
- *
- * @param client used to connect to the cluster
- * @param builder used to turn elements of T into IndexDefinitions so they can be used in the bulk indexer
- * @param listener a listener which is notified on each acknowledge batch item
- * @param batchSize the number of elements to group together per batch aside from the last batch
- * @param concurrentRequests the number of concurrent batch operations
- * @param refreshAfterOp if the index should be refreshed after each bulk operation
- * @param completionFn a function which is invoked when all sent requests have been acknowledged and the publisher has completed
- * @param errorFn a function which is invoked when there is an error
- * @param flushInterval used to schedule periodic bulk indexing. Use it when the publisher will never complete.
- *                     This ensures that all elements are indexed, even if the last batch size is lower than batch size
- *
- * @tparam T the type of element provided by the publisher this subscriber will subscribe with
- */
+  * An implementation of the reactive API Subscriber.
+  * This subscriber will bulk index received elements. The bulk nature means that the elasticsearch
+  * index operations are performed as a bulk call, the size of which are controlled by the batchSize param.
+  *
+  * The received elements must be converted into an elastic4s bulk compatible definition, such as index or delete.
+  * This is done by the RequestBuilder.
+  *
+  * @param client used to connect to the cluster
+  * @param builder used to turn elements of T into IndexDefinitions so they can be used in the bulk indexer
+  * @param listener a listener which is notified on each acknowledge batch item
+  * @param batchSize the number of elements to group together per batch aside from the last batch
+  * @param concurrentRequests the number of concurrent batch operations
+  * @param refreshAfterOp if the index should be refreshed after each bulk operation
+  * @param completionFn a function which is invoked when all sent requests have been acknowledged and the publisher has completed
+  * @param errorFn a function which is invoked when there is an error
+  * @param flushInterval used to schedule periodic bulk indexing. Use it when the publisher will never complete.
+  *                      This ensures that all elements are indexed, even if the last batch size is lower than batch size
+  *
+  * @tparam T the type of element provided by the publisher this subscriber will subscribe with
+  */
 class BulkIndexingSubscriber[T] private[streams](client: ElasticClient,
                                                  builder: RequestBuilder[T],
                                                  listener: ResponseListener,
@@ -37,8 +37,10 @@ class BulkIndexingSubscriber[T] private[streams](client: ElasticClient,
                                                  refreshAfterOp: Boolean,
                                                  completionFn: () => Unit,
                                                  errorFn: Throwable => Unit,
-                                                 flushInterval: Option[FiniteDuration])
+                                                 flushInterval: Option[FiniteDuration],
+                                                 failureFn: (BulkDefinition, BulkResult) => Option[BulkDefinition] = BulkIndexingSubscriber.defaultFailureFn)
                                                 (implicit system: ActorSystem) extends Subscriber[T] {
+
 
   private var actor: ActorRef = _
 
@@ -56,7 +58,8 @@ class BulkIndexingSubscriber[T] private[streams](client: ElasticClient,
           listener,
           completionFn,
           errorFn,
-          flushInterval))
+          flushInterval,
+          failureFn))
       )
       s.request(batchSize * concurrentRequests)
     } else {
@@ -81,9 +84,19 @@ class BulkIndexingSubscriber[T] private[streams](client: ElasticClient,
   }
 }
 
+object BulkIndexingSubscriber {
+  def defaultFailureFn(req: BulkDefinition, resp: BulkResult):Option[BulkDefinition] = {
+    new HasFailuresException("Bulk request has failures.", resp)
+    None
+  }
+}
+
 object BulkActor {
+
   case object Completed
+
   case object ForceIndexing
+
 }
 
 class BulkActor[T](client: ElasticClient,
@@ -95,7 +108,8 @@ class BulkActor[T](client: ElasticClient,
                    listener: ResponseListener,
                    completionFn: () => Unit,
                    errorFn: Throwable => Unit,
-                   flushInterval: Option[FiniteDuration] = None) extends Actor {
+                   flushInterval: Option[FiniteDuration] = None,
+                   failureFn: (BulkDefinition, BulkResult) => Option[BulkDefinition]) extends Actor {
 
   import ElasticDsl._
   import context.{dispatcher, system}
@@ -137,6 +151,14 @@ class BulkActor[T](client: ElasticClient,
       if (completed) shutdownIfAllAcked()
       else subscription.request(batchSize)
 
+    case r: BulkResultWithFailures =>
+      val maybeNewReq = failureFn(r.req, r.resp)
+      if (maybeNewReq.isDefined) {
+        self ! maybeNewReq.get
+      } else {
+        self ! r.resp
+      }
+
     case t: T =>
       buffer.append(t)
       if (buffer.size == batchSize)
@@ -167,7 +189,8 @@ class BulkActor[T](client: ElasticClient,
     def send(req: BulkDefinition): Unit = {
       client.execute(req).onComplete {
         case Failure(e) => self ! e
-        case Success(resp: BulkResult) if resp.hasFailures => self ! new HasFailuresException("Bulk request has failures.", resp)
+        case Success(resp: BulkResult) if resp.hasFailures =>
+          self ! BulkResultWithFailures(req, resp)
         case Success(resp: BulkResult) => self ! resp
       }
     }
@@ -179,16 +202,16 @@ class BulkActor[T](client: ElasticClient,
 }
 
 /**
- * An implementation of this typeclass must provide a bulk compatible request for the given instance of T.
- * @tparam T the type of elements this provider supports
- */
+  * An implementation of this typeclass must provide a bulk compatible request for the given instance of T.
+  * @tparam T the type of elements this provider supports
+  */
 trait RequestBuilder[T] {
   def request(t: T): BulkCompatibleDefinition
 }
 
 /**
- * Notified on each acknowledgement
- */
+  * Notified on each acknowledgement
+  */
 trait ResponseListener {
   def onAck(resp: BulkItemResult): Unit
 }
@@ -198,3 +221,5 @@ object ResponseListener {
     override def onAck(resp: BulkItemResult): Unit = ()
   }
 }
+
+case class BulkResultWithFailures(req: BulkDefinition, resp: BulkResult)
