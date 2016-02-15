@@ -194,7 +194,7 @@ class BulkActor[T](client: ElasticClient,
         case Success(resp: BulkResult) => self ! resp
       }
     }
-    val defs = buffer.map(t => builder.request(t))
+    val defs = buffer.flatMap(t => builder.request(t))
     val req = bulk(defs).refresh(refreshAfterOp)
     send(req)
     buffer.clear
@@ -206,7 +206,7 @@ class BulkActor[T](client: ElasticClient,
   * @tparam T the type of elements this provider supports
   */
 trait RequestBuilder[T] {
-  def request(t: T): BulkCompatibleDefinition
+  def request(t: T): Seq[BulkCompatibleDefinition]
 }
 
 /**
