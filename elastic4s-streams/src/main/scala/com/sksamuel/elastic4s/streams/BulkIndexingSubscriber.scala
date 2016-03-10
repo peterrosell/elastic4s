@@ -1,11 +1,13 @@
 package com.sksamuel.elastic4s.streams
 
-import akka.actor.{Actor, ActorRef, ActorSystem, Cancellable, Props}
+import akka.actor.SupervisorStrategy.{Escalate, Resume}
+import akka.actor._
 import com.sksamuel.elastic4s.{BulkCompatibleDefinition, BulkDefinition, BulkItemResult, BulkResult, ElasticClient, ElasticDsl}
+import org.elasticsearch.client.transport.NoNodeAvailableException
 import org.reactivestreams.{Subscriber, Subscription}
 
 import scala.collection.mutable.ArrayBuffer
-import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration.{FiniteDuration, _}
 import scala.util.{Failure, Success}
 
 /**
@@ -26,7 +28,6 @@ import scala.util.{Failure, Success}
   * @param errorFn a function which is invoked when there is an error
   * @param flushInterval used to schedule periodic bulk indexing. Use it when the publisher will never complete.
   *                      This ensures that all elements are indexed, even if the last batch size is lower than batch size
-  *
   * @tparam T the type of element provided by the publisher this subscriber will subscribe with
   */
 class BulkIndexingSubscriber[T] private[streams](client: ElasticClient,
@@ -128,6 +129,13 @@ class BulkActor[T](client: ElasticClient,
     system.scheduler.schedule(interval, interval, self, BulkActor.ForceIndexing)
   }
 
+  override val supervisorStrategy =
+    OneForOneStrategy(maxNrOfRetries = 10, withinTimeRange = 1 minute) {
+      case _: NoNodeAvailableException      => Resume
+      case t =>
+        super.supervisorStrategy.decider.applyOrElse(t, (_: Any) => Escalate)
+    }
+
   def receive = {
     case t: Throwable =>
       handleError(t)
@@ -194,7 +202,7 @@ class BulkActor[T](client: ElasticClient,
         case Success(resp: BulkResult) => self ! resp
       }
     }
-    val defs = buffer.flatMap(t => builder.request(t))
+    val defs = buffer.map(t => builder.request(t))
     val req = bulk(defs).refresh(refreshAfterOp)
     send(req)
     buffer.clear
@@ -206,7 +214,7 @@ class BulkActor[T](client: ElasticClient,
   * @tparam T the type of elements this provider supports
   */
 trait RequestBuilder[T] {
-  def request(t: T): Seq[BulkCompatibleDefinition]
+  def request(t: T): BulkCompatibleDefinition
 }
 
 /**
